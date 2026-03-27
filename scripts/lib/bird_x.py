@@ -99,6 +99,8 @@ def is_bird_authenticated() -> Optional[str]:
             ["node", str(_BIRD_SEARCH_MJS), "--whoami"],
             capture_output=True,
             text=True,
+            encoding='utf-8',
+            errors='replace',
             timeout=15,
             env=_subprocess_env(),
         )
@@ -175,6 +177,8 @@ def _run_bird_search(query: str, count: int, timeout: int) -> Dict[str, Any]:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding='utf-8',
+            errors='replace',
             preexec_fn=preexec,
             env=_subprocess_env(),
         )
@@ -192,7 +196,7 @@ def _run_bird_search(query: str, count: int, timeout: int) -> Dict[str, Any]:
             # Kill the entire process group
             try:
                 os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-            except (ProcessLookupError, PermissionError, OSError):
+            except (ProcessLookupError, PermissionError, OSError, AttributeError):
                 proc.kill()
             proc.wait(timeout=5)
             return {"error": f"Search timed out after {timeout}s", "items": []}
@@ -203,15 +207,22 @@ def _run_bird_search(query: str, count: int, timeout: int) -> Dict[str, Any]:
             except (ImportError, Exception):
                 pass
 
+        output = stdout.strip() if stdout else ""
+
+        # On Windows, Bird CLI may crash during Node.js cleanup with a libuv
+        # assertion error (exit code 127) AFTER successfully writing results
+        # to stdout. Try to parse stdout first regardless of return code.
+        if output:
+            try:
+                return json.loads(output)
+            except json.JSONDecodeError:
+                pass
+
         if proc.returncode != 0:
             error = stderr.strip() if stderr else "Bird search failed"
             return {"error": error, "items": []}
 
-        output = stdout.strip() if stdout else ""
-        if not output:
-            return {"items": []}
-
-        return json.loads(output)
+        return {"items": []}
 
     except json.JSONDecodeError as e:
         return {"error": f"Invalid JSON response: {e}", "items": []}
@@ -332,6 +343,8 @@ def search_handles(
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                encoding='utf-8',
+                errors='replace',
                 preexec_fn=preexec,
                 env=_subprocess_env(),
             )
@@ -341,18 +354,19 @@ def search_handles(
             except subprocess.TimeoutExpired:
                 try:
                     os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-                except (ProcessLookupError, PermissionError, OSError):
+                except (ProcessLookupError, PermissionError, OSError, AttributeError):
                     proc.kill()
                 proc.wait(timeout=5)
                 _log(f"Handle search timed out for @{handle}")
                 continue
 
-            if proc.returncode != 0:
-                _log(f"Handle search failed for @{handle}: {(stderr or '').strip()}")
-                continue
-
             output = (stdout or "").strip()
+
+            # On Windows, Bird CLI may crash during cleanup but still produce
+            # valid output. Try to parse stdout first regardless of return code.
             if not output:
+                if proc.returncode != 0:
+                    _log(f"Handle search failed for @{handle}: {(stderr or '').strip()}")
                 continue
 
             response = json.loads(output)
